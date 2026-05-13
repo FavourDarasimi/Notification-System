@@ -19,8 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 env = environ.Env()
 environ.Env.read_env(BASE_DIR / ".env")
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
-BASE_DIR = Path(__file__).resolve().parent.parent
+
 
 
 # Quick-start development settings - unsuitable for production
@@ -34,20 +33,34 @@ SECRET_KEY = env("SECRET_KEY")
 
 # Application definition
 
-INSTALLED_APPS = [
+
+
+DJANGO_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    
+]
+
+THIRD_PARTY_APPS = [
     "rest_framework",
     "corsheaders",
     "channels",
     "django_celery_beat",
     "django_celery_results",
 ]
+
+LOCAL_APPS = [
+    "apps.users",
+    "apps.notifications",
+]
+
+
+INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS 
+
+AUTH_USER_MODEL = "users.User"
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
