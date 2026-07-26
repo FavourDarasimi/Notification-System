@@ -241,6 +241,10 @@ CHANNEL_LAYERS = {
 
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
+# Service API token for server-to-server notification creation
+# Used by ServiceTokenAuthentication — not for end-user JWT auth.
+SERVICE_API_TOKEN = env("SERVICE_API_TOKEN", default="")
+
 # Pusher (real-time delivery)
 PUSHER_APP_ID = env("PUSHER_APP_ID", default="")
 PUSHER_KEY = env("PUSHER_KEY", default="")
