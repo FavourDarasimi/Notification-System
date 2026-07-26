@@ -1,3 +1,338 @@
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from rest_framework import status
+from rest_framework.test import APIClient
 
-# Create your tests here.
+from .models import Notification, NotificationType
+
+
+def assert_unauthorized(response):
+    """Accept either 401 or 403 — both indicate the request was rejected."""
+    assert response.status_code in (
+        status.HTTP_401_UNAUTHORIZED,
+        status.HTTP_403_FORBIDDEN,
+    ), f"Expected 401 or 403, got {response.status_code}: {response.content}"
+
+
+@override_settings(SERVICE_API_TOKEN="test-service-token")
+class NotificationAPITestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.ntype = NotificationType.objects.create(
+            key="test_type",
+            name="Test Type",
+            default_channels=["in_app"],
+        )
+        cls.ntype2 = NotificationType.objects.create(
+            key="other_type",
+            name="Other Type",
+            default_channels=["in_app"],
+        )
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        self.user_a = User.objects.create_user(
+            email="a@test.com", password="pass", username="user_a"
+        )
+        self.user_b = User.objects.create_user(
+            email="b@test.com", password="pass", username="user_b"
+        )
+        self.client_a = APIClient()
+        self.client_a.force_authenticate(user=self.user_a)
+        self.client_b = APIClient()
+        self.client_b.force_authenticate(user=self.user_b)
+        self.service_client = APIClient()
+        self.service_client.credentials(
+            HTTP_AUTHORIZATION="Service test-service-token"
+        )
+        self.anon_client = APIClient()
+
+        # Seed a notification for user_a
+        self.notif_a = Notification.objects.create(
+            recipient=self.user_a,
+            notification_type=self.ntype,
+            message="Hello A",
+        )
+        # And one for user_b
+        self.notif_b = Notification.objects.create(
+            recipient=self.user_b,
+            notification_type=self.ntype2,
+            message="Hello B",
+        )
+
+    # --- Notification List (GET /api/notifications/) ---
+
+    def test_list_returns_only_own_notifications(self):
+        r = self.client_a.get("/api/notifications/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        results = r.data.get("results", r.data)
+        ids = [n["id"] for n in results]
+        self.assertIn(str(self.notif_a.id), ids)
+        self.assertNotIn(str(self.notif_b.id), ids)
+
+    def test_list_requires_auth(self):
+        r = self.anon_client.get("/api/notifications/")
+        assert_unauthorized(r)
+
+    def test_list_filter_by_is_read(self):
+        Notification.objects.create(
+            recipient=self.user_a,
+            notification_type=self.ntype,
+            message="Unread",
+            is_read=False,
+        )
+        Notification.objects.create(
+            recipient=self.user_a,
+            notification_type=self.ntype,
+            message="Read",
+            is_read=True,
+        )
+
+        r = self.client_a.get("/api/notifications/?is_read=true")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        results = r.data.get("results", r.data)
+        self.assertTrue(all(n["is_read"] for n in results))
+
+        r = self.client_a.get("/api/notifications/?is_read=false")
+        results = r.data.get("results", r.data)
+        self.assertTrue(all(not n["is_read"] for n in results))
+
+    def test_list_filter_by_notification_type(self):
+        r = self.client_a.get(
+            f"/api/notifications/?notification_type={self.ntype.key}"
+        )
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        results = r.data.get("results", r.data)
+        for n in results:
+            self.assertEqual(n["notification_type"], self.ntype.key)
+
+    # --- Unread Count (GET /api/notifications/unread-count/) ---
+
+    def test_unread_count_is_user_scoped(self):
+        r = self.client_a.get("/api/notifications/unread-count/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["count"], 1)  # notif_a is unread
+
+        # Mark user_a's notification as read
+        Notification.objects.filter(recipient=self.user_a).update(is_read=True)
+        r = self.client_a.get("/api/notifications/unread-count/")
+        self.assertEqual(r.data["count"], 0)
+
+        # user_b's unread count should be unaffected
+        r = self.client_b.get("/api/notifications/unread-count/")
+        self.assertEqual(r.data["count"], 1)  # notif_b is still unread
+
+    def test_unread_count_requires_auth(self):
+        r = self.anon_client.get("/api/notifications/unread-count/")
+        assert_unauthorized(r)
+
+    # --- Mark Read (PATCH /api/notifications/{id}/read/) ---
+
+    def test_mark_read_own_notification(self):
+        r = self.client_a.patch(
+            f"/api/notifications/{self.notif_a.id}/read/"
+        )
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertTrue(r.data["is_read"])
+        self.assertIsNotNone(r.data["read_at"])
+
+    def test_mark_read_other_users_notification_returns_404(self):
+        r = self.client_a.patch(
+            f"/api/notifications/{self.notif_b.id}/read/"
+        )
+        self.assertEqual(r.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_mark_read_requires_auth(self):
+        r = self.anon_client.patch(
+            f"/api/notifications/{self.notif_a.id}/read/"
+        )
+        assert_unauthorized(r)
+
+    # --- Mark All Read (POST /api/notifications/mark-all-read/) ---
+
+    def test_mark_all_read_only_affects_own(self):
+        Notification.objects.create(
+            recipient=self.user_a,
+            notification_type=self.ntype,
+            message="A another",
+        )
+        r = self.client_a.post("/api/notifications/mark-all-read/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["updated"], 2)  # notif_a + the new one
+
+        # user_b's notifications remain unread
+        self.assertFalse(
+            Notification.objects.get(id=self.notif_b.id).is_read
+        )
+
+    def test_mark_all_read_requires_auth(self):
+        r = self.anon_client.post("/api/notifications/mark-all-read/")
+        assert_unauthorized(r)
+
+    # --- Delete (DELETE /api/notifications/{id}/) ---
+
+    def test_delete_own_notification(self):
+        r = self.client_a.delete(
+            f"/api/notifications/{self.notif_a.id}/"
+        )
+        self.assertEqual(r.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(
+            Notification.objects.filter(id=self.notif_a.id).exists()
+        )
+
+    def test_delete_other_users_notification_returns_404(self):
+        r = self.client_a.delete(
+            f"/api/notifications/{self.notif_b.id}/"
+        )
+        self.assertEqual(r.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(
+            Notification.objects.filter(id=self.notif_b.id).exists()
+        )
+
+    def test_delete_requires_auth(self):
+        r = self.anon_client.delete(
+            f"/api/notifications/{self.notif_a.id}/"
+        )
+        assert_unauthorized(r)
+
+    # --- Create (POST /api/notifications/) ---
+
+    def test_create_single_with_service_token(self):
+        r = self.service_client.post(
+            "/api/notifications/",
+            {
+                "recipient_id": self.user_a.id,
+                "notification_type_key": self.ntype.key,
+                "message": "Single notification",
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r.data["message"], "Single notification")
+        self.assertEqual(
+            r.data["notification_type"], self.ntype.key
+        )
+
+    def test_create_without_service_token_returns_401(self):
+        r = self.anon_client.post(
+            "/api/notifications/",
+            {
+                "recipient_id": self.user_a.id,
+                "notification_type_key": self.ntype.key,
+                "message": "No service token",
+            },
+            format="json",
+        )
+        assert_unauthorized(r)
+
+    def test_create_with_invalid_service_token_returns_401(self):
+        bad_client = APIClient()
+        bad_client.credentials(HTTP_AUTHORIZATION="Service wrong-token")
+        r = bad_client.post(
+            "/api/notifications/",
+            {
+                "recipient_id": self.user_a.id,
+                "notification_type_key": self.ntype.key,
+                "message": "Bad token",
+            },
+            format="json",
+        )
+        assert_unauthorized(r)
+
+    def test_create_idempotent_returns_existing(self):
+        key = "dup-key-1"
+        r1 = self.service_client.post(
+            "/api/notifications/",
+            {
+                "recipient_id": self.user_a.id,
+                "notification_type_key": self.ntype.key,
+                "message": "First",
+                "idempotency_key": key,
+            },
+            format="json",
+        )
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
+        first_id = r1.data["id"]
+
+        r2 = self.service_client.post(
+            "/api/notifications/",
+            {
+                "recipient_id": self.user_a.id,
+                "notification_type_key": self.ntype.key,
+                "message": "Second (should be ignored)",
+                "idempotency_key": key,
+            },
+            format="json",
+        )
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+        self.assertEqual(r2.data["id"], first_id)
+        self.assertEqual(r2.data["message"], "First")  # original preserved
+
+    def test_create_bulk(self):
+        r = self.service_client.post(
+            "/api/notifications/",
+            {
+                "notifications": [
+                    {
+                        "recipient_id": self.user_a.id,
+                        "notification_type_key": self.ntype.key,
+                        "message": "Bulk 1",
+                    },
+                    {
+                        "recipient_id": self.user_b.id,
+                        "notification_type_key": self.ntype2.key,
+                        "message": "Bulk 2",
+                    },
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(r.data), 2)
+        messages = {n["message"] for n in r.data}
+        self.assertEqual(messages, {"Bulk 1", "Bulk 2"})
+
+    def test_create_bulk_with_mixed_idempotency(self):
+        key = "bulk-dup"
+        self.service_client.post(
+            "/api/notifications/",
+            {
+                "recipient_id": self.user_a.id,
+                "notification_type_key": self.ntype.key,
+                "message": "Original",
+                "idempotency_key": key,
+            },
+            format="json",
+        )
+        r = self.service_client.post(
+            "/api/notifications/",
+            {
+                "notifications": [
+                    {
+                        "recipient_id": self.user_a.id,
+                        "notification_type_key": self.ntype.key,
+                        "message": "Existing",
+                        "idempotency_key": key,
+                    },
+                    {
+                        "recipient_id": self.user_b.id,
+                        "notification_type_key": self.ntype2.key,
+                        "message": "New",
+                    },
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(r.data), 2)
+        messages = {n["message"] for n in r.data}
+        self.assertEqual(messages, {"Original", "New"})
+
+    def test_create_invalid_data_returns_400(self):
+        r = self.service_client.post(
+            "/api/notifications/",
+            {"recipient_id": 99999, "notification_type_key": "nonexistent"},
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
