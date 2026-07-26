@@ -336,3 +336,146 @@ class NotificationAPITestCase(TestCase):
             format="json",
         )
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class NotificationPreferenceTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.ntype_a = NotificationType.objects.create(
+            key="comment_reply",
+            name="Comment Reply",
+            default_channels=["in_app", "email"],
+        )
+        cls.ntype_b = NotificationType.objects.create(
+            key="system_alert",
+            name="System Alert",
+            default_channels=["in_app"],
+        )
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            email="pref@test.com", password="pass", username="pref_user"
+        )
+        self.other = User.objects.create_user(
+            email="other@test.com", password="pass", username="other_user"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.other_client = APIClient()
+        self.other_client.force_authenticate(user=self.other)
+        self.anon_client = APIClient()
+
+    # --- GET /api/notifications/preferences/ ---
+
+    def test_get_returns_all_types_with_defaults(self):
+        r = self.client.get("/api/notifications/preferences/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        data = {p["notification_type"]: p for p in r.data}
+
+        self.assertIn("comment_reply", data)
+        self.assertEqual(data["comment_reply"]["in_app"], True)
+        self.assertEqual(data["comment_reply"]["email"], True)
+
+        self.assertIn("system_alert", data)
+        self.assertEqual(data["system_alert"]["in_app"], True)
+        self.assertEqual(data["system_alert"]["email"], False)
+
+    def test_get_auto_creates_for_new_type(self):
+        NotificationType.objects.create(
+            key="welcome", name="Welcome", default_channels=["email"]
+        )
+
+        r = self.client.get("/api/notifications/preferences/")
+        data = {p["notification_type"]: p for p in r.data}
+
+        self.assertIn("welcome", data)
+        self.assertEqual(data["welcome"]["in_app"], False)
+        self.assertEqual(data["welcome"]["email"], True)
+
+    def test_get_requires_auth(self):
+        r = self.anon_client.get("/api/notifications/preferences/")
+        assert_unauthorized(r)
+
+    def test_get_is_user_scoped(self):
+        r = self.client.get("/api/notifications/preferences/")
+        my_data = {p["notification_type"]: p for p in r.data}
+
+        r2 = self.other_client.get("/api/notifications/preferences/")
+        other_data = {p["notification_type"]: p for p in r2.data}
+
+        self.assertEqual(set(my_data.keys()), set(other_data.keys()))
+        self.assertEqual(my_data["comment_reply"]["email"], True)
+        self.assertEqual(other_data["comment_reply"]["email"], True)
+
+    # --- PUT /api/notifications/preferences/ ---
+
+    def test_put_updates_existing_preference(self):
+        r = self.client.put(
+            "/api/notifications/preferences/",
+            [
+                {
+                    "notification_type_key": "comment_reply",
+                    "email": False,
+                }
+            ],
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        data = {p["notification_type"]: p for p in r.data}
+        self.assertEqual(data["comment_reply"]["email"], False)
+        self.assertEqual(data["comment_reply"]["in_app"], True)  # unchanged
+
+    def test_put_creates_missing_preference_row(self):
+        NotificationType.objects.create(
+            key="welcome", name="Welcome", default_channels=["email"]
+        )
+
+        r = self.client.put(
+            "/api/notifications/preferences/",
+            [
+                {
+                    "notification_type_key": "welcome",
+                    "in_app": True,
+                    "email": True,
+                }
+            ],
+            format="json",
+        )
+        data = {p["notification_type"]: p for p in r.data}
+        self.assertEqual(data["welcome"]["in_app"], True)
+        self.assertEqual(data["welcome"]["email"], True)
+
+    def test_put_partial_update_keeps_other_fields(self):
+        r = self.client.put(
+            "/api/notifications/preferences/",
+            [
+                {
+                    "notification_type_key": "comment_reply",
+                    "in_app": False,
+                }
+            ],
+            format="json",
+        )
+        data = {p["notification_type"]: p for p in r.data}
+        # in_app was changed, email should still be True from defaults
+        self.assertEqual(data["comment_reply"]["in_app"], False)
+        self.assertEqual(data["comment_reply"]["email"], True)
+
+    def test_put_invalid_notification_type_returns_400(self):
+        r = self.client.put(
+            "/api/notifications/preferences/",
+            [{"notification_type_key": "nonexistent"}],
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_put_requires_auth(self):
+        r = self.anon_client.put(
+            "/api/notifications/preferences/",
+            [{"notification_type_key": "comment_reply"}],
+            format="json",
+        )
+        assert_unauthorized(r)

@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from .models import Notification, NotificationType
+from .models import Notification, NotificationPreference, NotificationType
 
 
 class NotificationSerializer(serializers.ModelSerializer):
@@ -66,3 +66,26 @@ class NotificationCreateSerializer(serializers.Serializer):
 
 class BulkNotificationCreateSerializer(serializers.Serializer):
     notifications = NotificationCreateSerializer(many=True, min_length=1)
+
+
+class NotificationPreferenceReadSerializer(serializers.ModelSerializer):
+    notification_type = serializers.SlugField(
+        source="notification_type.key", read_only=True
+    )
+
+    class Meta:
+        model = NotificationPreference
+        fields = ["notification_type", "in_app", "email"]
+
+
+class NotificationPreferenceWriteItemSerializer(serializers.Serializer):
+    notification_type_key = serializers.SlugField()
+    in_app = serializers.BooleanField(required=False)
+    email = serializers.BooleanField(required=False)
+
+    def validate_notification_type_key(self, value):
+        if not NotificationType.objects.filter(key=value).exists():
+            raise serializers.ValidationError(
+                f"NotificationType '{value}' does not exist."
+            )
+        return value

@@ -9,11 +9,13 @@ from rest_framework.views import APIView
 
 from .auth import ServiceTokenAuthentication
 from .filters import NotificationFilter
-from .models import Notification, NotificationType
+from .models import Notification, NotificationPreference, NotificationType
 from .pagination import NotificationCursorPagination
 from .serializers import (
     BulkNotificationCreateSerializer,
     NotificationCreateSerializer,
+    NotificationPreferenceReadSerializer,
+    NotificationPreferenceWriteItemSerializer,
     NotificationSerializer,
 )
 
@@ -151,3 +153,70 @@ class NotificationDeleteView(APIView):
         )
         notification.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class NotificationPreferenceView(APIView):
+    def get(self, request):
+        preferences = self._get_or_create_preferences(request.user)
+        serializer = NotificationPreferenceReadSerializer(preferences, many=True)
+        return Response(serializer.data)
+
+    def put(self, request):
+        serializer = NotificationPreferenceWriteItemSerializer(
+            data=request.data, many=True
+        )
+        serializer.is_valid(raise_exception=True)
+
+        for item in serializer.validated_data:
+            ntype = NotificationType.objects.get(
+                key=item["notification_type_key"]
+            )
+            channels = ntype.default_channels or []
+            pref, _ = NotificationPreference.objects.get_or_create(
+                user=request.user,
+                notification_type=ntype,
+                defaults={
+                    "in_app": "in_app" in channels,
+                    "email": "email" in channels,
+                },
+            )
+
+            changed = False
+            if "in_app" in item and item["in_app"] != pref.in_app:
+                pref.in_app = item["in_app"]
+                changed = True
+            if "email" in item and item["email"] != pref.email:
+                pref.email = item["email"]
+                changed = True
+            if changed:
+                pref.save()
+
+        preferences = self._get_or_create_preferences(request.user)
+        response_serializer = NotificationPreferenceReadSerializer(
+            preferences, many=True
+        )
+        return Response(response_serializer.data)
+
+    @staticmethod
+    def _get_or_create_preferences(user):
+        existing = {
+            p.notification_type_id: p
+            for p in NotificationPreference.objects.filter(
+                user=user
+            ).select_related("notification_type")
+        }
+        all_types = NotificationType.objects.all()
+        result = []
+        for ntype in all_types:
+            if ntype.id in existing:
+                result.append(existing[ntype.id])
+            else:
+                channels = ntype.default_channels or []
+                pref = NotificationPreference.objects.create(
+                    user=user,
+                    notification_type=ntype,
+                    in_app="in_app" in channels,
+                    email="email" in channels,
+                )
+                result.append(pref)
+        return result

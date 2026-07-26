@@ -19,6 +19,11 @@ urlpatterns = [
         name="notification-mark-all-read",
     ),
     path(
+        "preferences/",
+        views.NotificationPreferenceView.as_view(),
+        name="notification-preferences",
+    ),
+    path(
         "<uuid:id>/read/",
         views.NotificationReadView.as_view(),
         name="notification-read",
