@@ -158,7 +158,9 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": "100/hour",
-        "user": "1000/hour",
+        "user": "10000/hour",
+        "notifications_list": "60/minute",
+        "notifications_test": "10/minute",
     },
 }
 
