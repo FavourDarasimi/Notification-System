@@ -7,11 +7,7 @@ __pycache__/
 task/
 
 # Django migrations (optional — keep if sharing DB structure)
-**/migrations/*.pyc
-**/migrations/__pycache__/
-**/migrations/*.log
-
-migrations/
+venv/
 # Django local settings (if separated)
 local_settings.py
 
@@ -59,4 +55,3 @@ pylint-output.txt
 dump.rdb
 
 .env
-
