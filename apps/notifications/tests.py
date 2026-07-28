@@ -1,8 +1,10 @@
+from unittest.mock import patch
+
 from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from .models import Notification, NotificationType
+from .models import DeliveryLog, Notification, NotificationType
 
 
 def assert_unauthorized(response):
@@ -336,6 +338,27 @@ class NotificationAPITestCase(TestCase):
             format="json",
         )
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
+    @patch("apps.notifications.services.pusher_client.publish_notification_event")
+    def test_create_creates_delivery_log(self, mock_publish):
+        with self.captureOnCommitCallbacks(execute=True):
+            r = self.service_client.post(
+                "/api/notifications/",
+                {
+                    "recipient_id": self.user_a.id,
+                    "notification_type_key": self.ntype.key,
+                    "message": "Delivery log test",
+                },
+                format="json",
+            )
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        notification = Notification.objects.get(id=r.data["id"])
+        log = DeliveryLog.objects.get(
+            notification=notification,
+            channel="in_app",
+        )
+        self.assertEqual(log.status, "sent")
 
 
 class NotificationPreferenceTestCase(TestCase):

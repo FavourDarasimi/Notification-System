@@ -22,6 +22,7 @@ from .serializers import (
     NotificationPreferenceWriteItemSerializer,
     NotificationSerializer,
 )
+from .tasks import dispatch_notification
 from .throttling import NotificationsListThrottle, NotificationsTestThrottle
 
 
@@ -118,11 +119,13 @@ class NotificationListCreateView(APIView):
                 seen_keys[key] = notification
 
         if to_create:
-            created = Notification.objects.bulk_create(to_create)
-            results.extend(created)
-            # TODO: Phase 4 — dispatch Celery tasks for each created notification
-            # for notification in created:
-            #     transaction.on_commit(lambda n=notification: dispatch_notification.delay(n.id))
+            with transaction.atomic():
+                created = Notification.objects.bulk_create(to_create)
+                results.extend(created)
+                for notification in created:
+                    transaction.on_commit(
+                        lambda n=notification: dispatch_notification.delay(n.id)
+                    )
 
         return results
 
