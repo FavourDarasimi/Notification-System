@@ -220,6 +220,7 @@ CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=["http://localho
 # ---------------------------------------------------------------------------
 # Celery
 # ---------------------------------------------------------------------------
+from celery.schedules import crontab
 from kombu import Queue
 
 CELERY_BROKER_URL = env("CELERY_BROKER_URL")
@@ -248,6 +249,19 @@ CELERY_TASK_ROUTES = {
     "apps.notifications.tasks.cleanup_old_notifications": {"queue": "cleanup"},
 }
 
+CELERY_BEAT_SCHEDULE = {
+    "send-digest-emails": {
+        "task": "apps.notifications.tasks.send_digest_emails",
+        "schedule": crontab(hour=8, minute=0),
+        "options": {"queue": "digest"},
+    },
+    "cleanup-old-notifications": {
+        "task": "apps.notifications.tasks.cleanup_old_notifications",
+        "schedule": crontab(hour=3, minute=0),
+        "options": {"queue": "cleanup"},
+    },
+}
+
 ASGI_APPLICATION = "core.asgi.application"
 
 CHANNEL_LAYERS = {
@@ -270,6 +284,8 @@ PUSHER_APP_ID = env("PUSHER_APP_ID", default="")
 PUSHER_KEY = env("PUSHER_KEY", default="")
 PUSHER_SECRET = env("PUSHER_SECRET", default="")
 PUSHER_CLUSTER = env("PUSHER_CLUSTER", default="")
+
+NOTIFICATION_RETENTION_DAYS = env.int("NOTIFICATION_RETENTION_DAYS", default=90)
 
 EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
 EMAIL_HOST = env("EMAIL_HOST", default="")

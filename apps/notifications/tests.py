@@ -1,6 +1,8 @@
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -582,3 +584,65 @@ class PusherAuthTestCase(TestCase):
             format="json",
         )
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+@override_settings(
+    CELERY_TASK_ALWAYS_EAGER=True,
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+)
+class TaskTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.ntype = NotificationType.objects.create(
+            key="task_type",
+            name="Task Type",
+            default_channels=["in_app", "email"],
+        )
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            email="task@test.com", password="pass", username="task_user"
+        )
+
+    def test_send_email_creates_delivery_log(self):
+        notification = Notification.objects.create(
+            recipient=self.user,
+            notification_type=self.ntype,
+            message="Email test",
+        )
+
+        from .tasks import send_email_notification
+
+        send_email_notification.delay(notification.id)
+
+        log = DeliveryLog.objects.get(
+            notification=notification,
+            channel="email",
+        )
+        self.assertEqual(log.status, "sent")
+
+    def test_cleanup_removes_old_notifications(self):
+        old = Notification.objects.create(
+            recipient=self.user,
+            notification_type=self.ntype,
+            message="Old notification",
+        )
+        Notification.objects.filter(id=old.id).update(
+            created_at=timezone.now() - timedelta(days=100)
+        )
+
+        recent = Notification.objects.create(
+            recipient=self.user,
+            notification_type=self.ntype,
+            message="Recent notification",
+        )
+
+        from .tasks import cleanup_old_notifications
+
+        cleanup_old_notifications.delay()
+
+        self.assertFalse(Notification.objects.filter(id=old.id).exists())
+        self.assertTrue(Notification.objects.filter(id=recent.id).exists())
