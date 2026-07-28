@@ -217,6 +217,11 @@ SIMPLE_JWT = {
 
 CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=["http://localhost:3000"])
 
+# ---------------------------------------------------------------------------
+# Celery
+# ---------------------------------------------------------------------------
+from kombu import Queue
+
 CELERY_BROKER_URL = env("CELERY_BROKER_URL")
 CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND")
 CELERY_ACCEPT_CONTENT = ["json"]
@@ -227,6 +232,21 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes hard limit
 CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60
+
+CELERY_TASK_QUEUES = (
+    Queue("realtime"),
+    Queue("email"),
+    Queue("digest"),
+    Queue("cleanup"),
+)
+CELERY_TASK_DEFAULT_QUEUE = "realtime"
+CELERY_TASK_ROUTES = {
+    "core.celery.debug_task": {"queue": "realtime"},
+    "apps.notifications.tasks.dispatch_notification": {"queue": "realtime"},
+    "apps.notifications.tasks.send_email_notification": {"queue": "email"},
+    "apps.notifications.tasks.send_digest_emails": {"queue": "digest"},
+    "apps.notifications.tasks.cleanup_old_notifications": {"queue": "cleanup"},
+}
 
 ASGI_APPLICATION = "core.asgi.application"
 
@@ -240,8 +260,6 @@ CHANNEL_LAYERS = {
         },
     },
 }
-
-CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 # Service API token for server-to-server notification creation
 # Used by ServiceTokenAuthentication — not for end-user JWT auth.
