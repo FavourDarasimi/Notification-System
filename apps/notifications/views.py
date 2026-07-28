@@ -1,13 +1,15 @@
+from django.conf import settings
 from django.db import transaction
 from django.db import connections
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status
-from rest_framework.decorators import permission_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+import pusher
 
 from .auth import ServiceTokenAuthentication
 from .filters import NotificationFilter
@@ -230,3 +232,38 @@ class NotificationPreferenceView(APIView):
                 )
                 result.append(pref)
         return result
+
+
+class PusherAuthView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        channel_name = request.data.get("channel_name")
+        socket_id = request.data.get("socket_id")
+
+        if not channel_name or not socket_id:
+            return Response(
+                {"error": "channel_name and socket_id are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        expected = f"private-user-{request.user.id}"
+        if channel_name != expected:
+            return Response(
+                {"error": "Forbidden channel"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        p = pusher.Pusher(
+            app_id=settings.PUSHER_APP_ID,
+            key=settings.PUSHER_KEY,
+            secret=settings.PUSHER_SECRET,
+            cluster=settings.PUSHER_CLUSTER,
+        )
+
+        auth = p.authenticate(
+            channel=channel_name,
+            socket_id=socket_id,
+        )
+
+        return Response(auth)

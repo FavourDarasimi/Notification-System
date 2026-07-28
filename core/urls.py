@@ -19,6 +19,8 @@ from django.db import connections
 from django.http import JsonResponse
 from django.urls import include, path
 
+from apps.notifications.views import PusherAuthView
+
 
 def healthz(request):
     db_ok = False
@@ -36,4 +38,5 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/auth/", include("apps.users.urls")),
     path("api/notifications/", include("apps.notifications.urls")),
+    path("api/pusher/auth/", PusherAuthView.as_view(), name="pusher-auth"),
 ]

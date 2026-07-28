@@ -479,3 +479,83 @@ class NotificationPreferenceTestCase(TestCase):
             format="json",
         )
         assert_unauthorized(r)
+
+
+from unittest.mock import patch
+
+
+class PusherAuthTestCase(TestCase):
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        self.user_a = User.objects.create_user(
+            email="pa@test.com", password="pass", username="pusher_a"
+        )
+        self.user_b = User.objects.create_user(
+            email="pb@test.com", password="pass", username="pusher_b"
+        )
+        self.client_a = APIClient()
+        self.client_a.force_authenticate(user=self.user_a)
+        self.client_b = APIClient()
+        self.client_b.force_authenticate(user=self.user_b)
+        self.anon_client = APIClient()
+
+    @patch("apps.notifications.views.pusher.Pusher")
+    def test_auth_own_channel(self, mock_pusher):
+        mock_pusher.return_value.authenticate.return_value = {
+            "auth": "signed:abc123"
+        }
+        r = self.client_a.post(
+            "/api/pusher/auth/",
+            {
+                "channel_name": f"private-user-{self.user_a.id}",
+                "socket_id": "1234.5678",
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data, {"auth": "signed:abc123"})
+        mock_pusher.return_value.authenticate.assert_called_once_with(
+            channel=f"private-user-{self.user_a.id}",
+            socket_id="1234.5678",
+        )
+
+    @patch("apps.notifications.views.pusher.Pusher")
+    def test_auth_other_users_channel_returns_403(self, mock_pusher):
+        r = self.client_a.post(
+            "/api/pusher/auth/",
+            {
+                "channel_name": f"private-user-{self.user_b.id}",
+                "socket_id": "1234.5678",
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_403_FORBIDDEN)
+        mock_pusher.return_value.authenticate.assert_not_called()
+
+    def test_auth_requires_jwt(self):
+        r = self.anon_client.post(
+            "/api/pusher/auth/",
+            {
+                "channel_name": "private-user-1",
+                "socket_id": "1234.5678",
+            },
+            format="json",
+        )
+        assert_unauthorized(r)
+
+    def test_auth_missing_params_returns_400(self):
+        r = self.client_a.post(
+            "/api/pusher/auth/",
+            {"channel_name": "private-user-1"},
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
+
+        r = self.client_a.post(
+            "/api/pusher/auth/",
+            {"socket_id": "1234.5678"},
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
