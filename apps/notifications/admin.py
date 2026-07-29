@@ -7,6 +7,7 @@ from .models import (
     NotificationTemplate,
     NotificationType,
 )
+from .tasks import dispatch_notification, send_email_notification
 
 
 @admin.register(NotificationType)
@@ -49,10 +50,7 @@ class NotificationTemplateAdmin(admin.ModelAdmin):
 
 
 def requeue_failed_deliveries(modeladmin, request, queryset):
-    """Requeue selected failed or retrying deliveries.
-
-    Stub implementation — actual Celery task wired in Phase 4.
-    """
+    """Requeue selected failed or retrying deliveries."""
     failed = queryset.filter(
         status__in=[DeliveryLog.Status.FAILED, DeliveryLog.Status.RETRYING],
     )
@@ -61,13 +59,19 @@ def requeue_failed_deliveries(modeladmin, request, queryset):
         modeladmin.message_user(request, "No failed/retrying deliveries selected.", messages.WARNING)
         return
 
-    # TODO: Phase 4 — call requeue_failed_delivery.delay(delivery_log_id)
-    # for log in failed:
-    #     requeue_failed_delivery.delay(log.id)
-    failed.update(status=DeliveryLog.Status.PENDING, last_error=None)
+    for log in failed.select_related("notification"):
+        log.status = DeliveryLog.Status.RETRYING
+        log.last_error = None
+        log.save(update_fields=["status", "last_error"])
+
+        if log.channel == DeliveryLog.Channel.IN_APP:
+            dispatch_notification.delay(log.notification_id)
+        elif log.channel == DeliveryLog.Channel.EMAIL:
+            send_email_notification.delay(log.notification_id)
+
     modeladmin.message_user(
         request,
-        f"Queued {count} delivery log(s) for retry (stub — Celery task not yet wired).",
+        f"Requeued {count} delivery log(s) for retry.",
         messages.SUCCESS,
     )
 
