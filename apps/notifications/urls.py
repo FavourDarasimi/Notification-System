@@ -9,6 +9,11 @@ urlpatterns = [
         name="notification-list-create",
     ),
     path(
+        "test/",
+        views.NotificationTestCreateView.as_view(),
+        name="notification-test-create",
+    ),
+    path(
         "unread-count/",
         views.NotificationUnreadCountView.as_view(),
         name="notification-unread-count",

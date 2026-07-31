@@ -56,6 +56,13 @@ class NotificationCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError("Recipient user does not exist.")
         return value
 
+    def validate_notification_type_key(self, value):
+        if not NotificationType.objects.filter(key=value).exists():
+            raise serializers.ValidationError(
+                f"NotificationType '{value}' does not exist."
+            )
+        return value
+
     def validate_actor_id(self, value):
         if value is not None:
             User = get_user_model()

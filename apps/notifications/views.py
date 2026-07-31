@@ -26,6 +26,57 @@ from .tasks import dispatch_notification
 from .throttling import NotificationsListThrottle, NotificationsTestThrottle
 
 
+def create_notifications(items):
+    """Shared notification create path (idempotency, bulk create, dispatch)."""
+    seen_keys = {}
+    to_create = []
+    results = []
+
+    for item in items:
+        key = item.get("idempotency_key")
+        if key:
+            if key in seen_keys:
+                n = seen_keys[key]
+                n._existing = True
+                results.append(n)
+                continue
+            try:
+                existing = Notification.objects.get(idempotency_key=key)
+                existing._existing = True
+                seen_keys[key] = existing
+                results.append(existing)
+                continue
+            except Notification.DoesNotExist:
+                pass
+
+        notification = Notification(
+            recipient_id=item["recipient_id"],
+            notification_type_id=NotificationType.objects.values_list(
+                "id", flat=True
+            ).get(key=item["notification_type_key"]),
+            actor_id=item.get("actor_id"),
+            message=item["message"],
+            verb=item.get("verb", ""),
+            data=item.get("data", {}),
+            priority=item.get("priority", Notification.Priority.NORMAL),
+            idempotency_key=item.get("idempotency_key"),
+        )
+        to_create.append(notification)
+        if key:
+            seen_keys[key] = notification
+
+    if to_create:
+        with transaction.atomic():
+            created = Notification.objects.bulk_create(to_create)
+            results.extend(created)
+            for notification in created:
+                transaction.on_commit(
+                    lambda n=notification: dispatch_notification.delay(n.id)
+                )
+
+    return results
+
+
 class NotificationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
     filterset_class = NotificationFilter
@@ -67,7 +118,7 @@ class NotificationListCreateView(APIView):
             serializer.is_valid(raise_exception=True)
             items = [serializer.validated_data]
 
-        results = self._perform_create(items)
+        results = create_notifications(items)
         any_new = any(
             not hasattr(n, "_existing") for n in results
         )
@@ -80,54 +131,31 @@ class NotificationListCreateView(APIView):
         status_code = status.HTTP_201_CREATED if any_new else status.HTTP_200_OK
         return Response(serializer.data, status=status_code)
 
-    def _perform_create(self, items):
-        seen_keys = {}
-        to_create = []
-        results = []
 
-        for item in items:
-            key = item.get("idempotency_key")
-            if key:
-                if key in seen_keys:
-                    n = seen_keys[key]
-                    n._existing = True
-                    results.append(n)
-                    continue
-                try:
-                    existing = Notification.objects.get(idempotency_key=key)
-                    existing._existing = True
-                    seen_keys[key] = existing
-                    results.append(existing)
-                    continue
-                except Notification.DoesNotExist:
-                    pass
+class NotificationTestCreateView(APIView):
+    """Feature-flagged test endpoint: self-notification via the real create path."""
 
-            notification = Notification(
-                recipient_id=item["recipient_id"],
-                notification_type_id=NotificationType.objects.values_list(
-                    "id", flat=True
-                ).get(key=item["notification_type_key"]),
-                actor_id=item.get("actor_id"),
-                message=item["message"],
-                verb=item.get("verb", ""),
-                data=item.get("data", {}),
-                priority=item.get("priority", Notification.Priority.NORMAL),
-                idempotency_key=item.get("idempotency_key"),
-            )
-            to_create.append(notification)
-            if key:
-                seen_keys[key] = notification
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [NotificationsTestThrottle]
 
-        if to_create:
-            with transaction.atomic():
-                created = Notification.objects.bulk_create(to_create)
-                results.extend(created)
-                for notification in created:
-                    transaction.on_commit(
-                        lambda n=notification: dispatch_notification.delay(n.id)
-                    )
+    def post(self, request):
+        if not getattr(settings, "DJANGO_ENABLE_TEST_ENDPOINTS", False):
+            return Response(status=status.HTTP_404_NOT_FOUND)
 
-        return results
+        serializer = NotificationCreateSerializer(
+            data={
+                "recipient_id": request.user.id,
+                "notification_type_key": request.data.get(
+                    "notification_type_key"
+                ),
+                "message": request.data.get("message", ""),
+            }
+        )
+        serializer.is_valid(raise_exception=True)
+
+        results = create_notifications([serializer.validated_data])
+        serializer = NotificationSerializer(results[0])
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class NotificationUnreadCountView(APIView):

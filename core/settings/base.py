@@ -130,6 +130,9 @@ CACHES = {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
             "SOCKET_CONNECT_TIMEOUT": 5,
             "SOCKET_TIMEOUT": 5,
+            # redis-py >= 6 defaults to RESP3 (sends HELLO 3 on connect);
+            # older Redis (e.g. 5.x on Windows) doesn't support it -> force RESP2.
+            "CONNECTION_POOL_KWARGS": {"protocol": 2},
         },
         "KEY_PREFIX": "notif",
     }
@@ -278,6 +281,9 @@ CHANNEL_LAYERS = {
 # Service API token for server-to-server notification creation
 # Used by ServiceTokenAuthentication — not for end-user JWT auth.
 SERVICE_API_TOKEN = env("SERVICE_API_TOKEN", default="")
+
+# Feature flag for test/demo endpoints (e.g. POST /api/notifications/test/)
+DJANGO_ENABLE_TEST_ENDPOINTS = env.bool("DJANGO_ENABLE_TEST_ENDPOINTS", default=False)
 
 # Pusher (real-time delivery)
 PUSHER_APP_ID = env("PUSHER_APP_ID", default="")

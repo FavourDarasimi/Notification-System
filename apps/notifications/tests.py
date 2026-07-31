@@ -646,3 +646,84 @@ class TaskTestCase(TestCase):
 
         self.assertFalse(Notification.objects.filter(id=old.id).exists())
         self.assertTrue(Notification.objects.filter(id=recent.id).exists())
+
+
+@override_settings(
+    DJANGO_ENABLE_TEST_ENDPOINTS=True,
+    CELERY_TASK_ALWAYS_EAGER=True,
+)
+class NotificationTestEndpointTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.ntype = NotificationType.objects.create(
+            key="test_type",
+            name="Test Type",
+            default_channels=["in_app"],
+        )
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            email="trigger@test.com", password="pass", username="trigger_user"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.anon_client = APIClient()
+
+    @patch("apps.notifications.services.pusher_client.publish_notification_event")
+    def test_create_self_notification_goes_through_dispatch(self, mock_publish):
+        with self.captureOnCommitCallbacks(execute=True):
+            r = self.client.post(
+                "/api/notifications/test/",
+                {
+                    "notification_type_key": self.ntype.key,
+                    "message": "Triggered by me",
+                },
+                format="json",
+            )
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r.data["recipient"], self.user.id)
+        self.assertEqual(r.data["message"], "Triggered by me")
+
+        notification = Notification.objects.get(id=r.data["id"])
+        log = DeliveryLog.objects.get(
+            notification=notification,
+            channel="in_app",
+        )
+        self.assertEqual(log.status, "sent")
+
+    def test_disabled_returns_404(self):
+        with override_settings(DJANGO_ENABLE_TEST_ENDPOINTS=False):
+            r = self.client.post(
+                "/api/notifications/test/",
+                {
+                    "notification_type_key": self.ntype.key,
+                    "message": "Nope",
+                },
+                format="json",
+            )
+        self.assertEqual(r.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_requires_auth(self):
+        r = self.anon_client.post(
+            "/api/notifications/test/",
+            {
+                "notification_type_key": self.ntype.key,
+                "message": "Anon",
+            },
+            format="json",
+        )
+        assert_unauthorized(r)
+
+    def test_invalid_type_returns_400(self):
+        r = self.client.post(
+            "/api/notifications/test/",
+            {
+                "notification_type_key": "does_not_exist",
+                "message": "Bad",
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
