@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.db import transaction
 from django.db import connections
+from django.db.models import Count, Exists, OuterRef
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -13,7 +14,13 @@ import pusher
 
 from .auth import ServiceTokenAuthentication
 from .filters import NotificationFilter
-from .models import Notification, NotificationPreference, NotificationType
+from .models import (
+    Notification,
+    NotificationPreference,
+    NotificationType,
+    Room,
+    RoomMember,
+)
 from .pagination import NotificationCursorPagination
 from .serializers import (
     BulkNotificationCreateSerializer,
@@ -21,6 +28,9 @@ from .serializers import (
     NotificationPreferenceReadSerializer,
     NotificationPreferenceWriteItemSerializer,
     NotificationSerializer,
+    RoomCreateSerializer,
+    RoomMemberSerializer,
+    RoomSerializer,
 )
 from .tasks import dispatch_notification
 from .throttling import NotificationsListThrottle, NotificationsTestThrottle
@@ -298,3 +308,144 @@ class PusherAuthView(APIView):
         )
 
         return Response(auth)
+
+
+def _annotated_rooms(user):
+    """Annotate member_count + is_member for a room queryset."""
+    joined = RoomMember.objects.filter(room=OuterRef("pk"), user=user)
+    return Room.objects.annotate(
+        member_count=Count("memberships"),
+        is_member=Exists(joined),
+    )
+
+
+class RoomListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        rooms = _annotated_rooms(request.user).order_by("name")
+        serializer = RoomSerializer(rooms, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = RoomCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        room = serializer.save(created_by=request.user)
+        RoomMember.objects.create(room=room, user=request.user)
+        room = _annotated_rooms(request.user).get(pk=room.pk)
+        return Response(
+            RoomSerializer(room).data, status=status.HTTP_201_CREATED
+        )
+
+
+class RoomDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, slug):
+        room = (
+            _annotated_rooms(request.user).filter(slug=slug).first()
+        )
+        if not room:
+            return Response(
+                {"error": "Room not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        members = RoomMember.objects.filter(room=room).select_related("user")
+        return Response(
+            {
+                "room": RoomSerializer(room).data,
+                "members": RoomMemberSerializer(members, many=True).data,
+            }
+        )
+
+
+class RoomJoinView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, slug):
+        room = get_object_or_404(Room, slug=slug)
+        RoomMember.objects.get_or_create(room=room, user=request.user)
+        return Response({"joined": True})
+
+
+class RoomLeaveView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, slug):
+        room = get_object_or_404(Room, slug=slug)
+        RoomMember.objects.filter(room=room, user=request.user).delete()
+        return Response({"left": True})
+
+
+class RoomSendView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, slug):
+        room = get_object_or_404(Room, slug=slug)
+        if not RoomMember.objects.filter(
+            room=room, user=request.user
+        ).exists():
+            return Response(
+                {"error": "Join the room before sending to it."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = NotificationCreateSerializer(
+            data={**request.data, "recipient_id": request.user.id}
+        )
+        serializer.is_valid(raise_exception=True)
+        item = serializer.validated_data
+        item["room_id"] = room.id
+        item["actor_id"] = request.user.id
+
+        member_ids = list(
+            RoomMember.objects.filter(room=room)
+            .exclude(user=request.user)
+            .values_list("user_id", flat=True)
+        )
+
+        if not member_ids:
+            return Response({"count": 0, "notifications": []})
+
+        ntype_id = NotificationType.objects.values_list("id", flat=True).get(
+            key=item["notification_type_key"]
+        )
+        key = item.get("idempotency_key")
+        to_create = [
+            Notification(
+                recipient_id=recipient_id,
+                notification_type_id=ntype_id,
+                actor_id=item["actor_id"],
+                room_id=room.id,
+                message=item["message"],
+                verb=item.get("verb", ""),
+                data=item.get("data", {}),
+                priority=item.get("priority", Notification.Priority.NORMAL),
+                idempotency_key=f"{key}:{recipient_id}" if key else None,
+            )
+            for recipient_id in member_ids
+        ]
+
+        created = []
+        with transaction.atomic():
+            if key:
+                existing_keys = set(
+                    Notification.objects.filter(
+                        idempotency_key__in=[
+                            n.idempotency_key for n in to_create
+                        ]
+                    ).values_list("idempotency_key", flat=True)
+                )
+                to_create = [
+                    n for n in to_create if n.idempotency_key not in existing_keys
+                ]
+            created = Notification.objects.bulk_create(to_create)
+            for notification in created:
+                transaction.on_commit(
+                    lambda n=notification: dispatch_notification.delay(n.id)
+                )
+
+        response_serializer = NotificationSerializer(created, many=True)
+        return Response(
+            {"count": len(created), "notifications": response_serializer.data},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )

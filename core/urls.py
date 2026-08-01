@@ -38,5 +38,6 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/auth/", include("apps.users.urls")),
     path("api/notifications/", include("apps.notifications.urls")),
+    path("api/rooms/", include("apps.notifications.urls_rooms")),
     path("api/pusher/auth/", PusherAuthView.as_view(), name="pusher-auth"),
 ]

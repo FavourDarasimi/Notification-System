@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from .models import DeliveryLog, Notification, NotificationType
+from .models import DeliveryLog, Notification, NotificationType, Room, RoomMember
 
 
 def assert_unauthorized(response):
@@ -727,3 +727,306 @@ class NotificationTestEndpointTestCase(TestCase):
             format="json",
         )
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+@override_settings(CELERY_TASK_ALWAYS_EAGER=True)
+class RoomTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.ntype = NotificationType.objects.create(
+            key="room_type",
+            name="Room Type",
+            default_channels=["in_app"],
+        )
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        patcher = patch(
+            "apps.notifications.services.pusher_client.publish_notification_event"
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        User = get_user_model()
+        self.user_a = User.objects.create_user(
+            email="room_a@test.com", password="pass", username="room_a"
+        )
+        self.user_b = User.objects.create_user(
+            email="room_b@test.com", password="pass", username="room_b"
+        )
+        self.user_c = User.objects.create_user(
+            email="room_c@test.com", password="pass", username="room_c"
+        )
+        self.client_a = APIClient()
+        self.client_a.force_authenticate(user=self.user_a)
+        self.client_b = APIClient()
+        self.client_b.force_authenticate(user=self.user_b)
+        self.client_c = APIClient()
+        self.client_c.force_authenticate(user=self.user_c)
+        self.anon_client = APIClient()
+
+        self.room = Room.objects.create(
+            slug="general",
+            name="General",
+            description="Everything",
+            created_by=self.user_a,
+        )
+        RoomMember.objects.create(room=self.room, user=self.user_a)
+        RoomMember.objects.create(room=self.room, user=self.user_b)
+
+    # --- Create (POST /api/rooms/) ---
+
+    def test_create_room_auto_joins_creator(self):
+        r = self.client_a.post(
+            "/api/rooms/",
+            {"name": "New Room"},
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r.data["slug"], "new-room")
+        self.assertTrue(r.data["is_member"])
+        self.assertEqual(r.data["member_count"], 1)
+        self.assertTrue(
+            RoomMember.objects.filter(
+                room__slug="new-room", user=self.user_a
+            ).exists()
+        )
+
+    def test_create_room_with_custom_slug(self):
+        r = self.client_a.post(
+            "/api/rooms/",
+            {"name": "Other", "slug": "custom-slug"},
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r.data["slug"], "custom-slug")
+
+    def test_create_room_slug_collision_appends_suffix(self):
+        r1 = self.client_a.post(
+            "/api/rooms/",
+            {"name": "General"},
+            format="json",
+        )
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r1.data["slug"], "general-2")
+
+        r2 = self.client_a.post(
+            "/api/rooms/",
+            {"name": "General"},
+            format="json",
+        )
+        self.assertEqual(r2.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r2.data["slug"], "general-3")
+
+    def test_create_room_requires_auth(self):
+        r = self.anon_client.post(
+            "/api/rooms/", {"name": "Nope"}, format="json"
+        )
+        assert_unauthorized(r)
+
+    # --- List (GET /api/rooms/) ---
+
+    def test_list_shows_all_rooms_with_membership(self):
+        r = self.client_b.get("/api/rooms/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        by_slug = {room["slug"]: room for room in r.data}
+        self.assertIn("general", by_slug)
+        self.assertTrue(by_slug["general"]["is_member"])
+        self.assertEqual(by_slug["general"]["member_count"], 2)
+
+        r = self.client_c.get("/api/rooms/")
+        by_slug = {room["slug"]: room for room in r.data}
+        self.assertFalse(by_slug["general"]["is_member"])
+
+    def test_list_requires_auth(self):
+        r = self.anon_client.get("/api/rooms/")
+        assert_unauthorized(r)
+
+    # --- Join / Leave ---
+
+    def test_join_is_idempotent(self):
+        r1 = self.client_c.post("/api/rooms/general/join/")
+        r2 = self.client_c.post("/api/rooms/general/join/")
+        self.assertEqual(r1.status_code, status.HTTP_200_OK)
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            RoomMember.objects.filter(
+                room=self.room, user=self.user_c
+            ).count(),
+            1,
+        )
+
+    def test_leave_removes_membership(self):
+        self.client_b.post("/api/rooms/general/leave/")
+        self.assertFalse(
+            RoomMember.objects.filter(
+                room=self.room, user=self.user_b
+            ).exists()
+        )
+
+    def test_leave_is_idempotent(self):
+        r = self.client_c.post("/api/rooms/general/leave/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+
+    def test_join_requires_auth(self):
+        r = self.anon_client.post("/api/rooms/general/join/")
+        assert_unauthorized(r)
+
+    # --- Detail (GET /api/rooms/<slug>/) ---
+
+    def test_detail_returns_room_and_members(self):
+        r = self.client_c.get("/api/rooms/general/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["room"]["slug"], "general")
+        emails = {m["email"] for m in r.data["members"]}
+        self.assertEqual(emails, {"room_a@test.com", "room_b@test.com"})
+
+    def test_detail_unknown_room_returns_404(self):
+        r = self.client_a.get("/api/rooms/nope/")
+        self.assertEqual(r.status_code, status.HTTP_404_NOT_FOUND)
+
+    # --- Send (POST /api/rooms/<slug>/send/) ---
+
+    def test_send_fans_out_to_other_members(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            r = self.client_a.post(
+                "/api/rooms/general/send/",
+                {
+                    "notification_type_key": self.ntype.key,
+                    "message": "Hello room",
+                },
+                format="json",
+            )
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r.data["count"], 1)
+
+        n = Notification.objects.get(recipient=self.user_b)
+        self.assertEqual(n.message, "Hello room")
+        self.assertEqual(n.room, self.room)
+        self.assertEqual(n.actor, self.user_a)
+        self.assertEqual(n.recipient, self.user_b)
+
+        # Sender must NOT receive their own room notification.
+        self.assertFalse(
+            Notification.objects.filter(recipient=self.user_a).exists()
+        )
+
+    def test_send_to_all_members_when_three_joined(self):
+        RoomMember.objects.create(room=self.room, user=self.user_c)
+        with self.captureOnCommitCallbacks(execute=True):
+            r = self.client_a.post(
+                "/api/rooms/general/send/",
+                {
+                    "notification_type_key": self.ntype.key,
+                    "message": "To all",
+                },
+                format="json",
+            )
+        self.assertEqual(r.data["count"], 2)
+        recipients = set(
+            Notification.objects.filter(room=self.room).values_list(
+                "recipient_id", flat=True
+            )
+        )
+        self.assertEqual(recipients, {self.user_b.id, self.user_c.id})
+
+    def test_send_with_no_other_members_returns_empty(self):
+        RoomMember.objects.filter(room=self.room, user=self.user_b).delete()
+        r = self.client_a.post(
+            "/api/rooms/general/send/",
+            {
+                "notification_type_key": self.ntype.key,
+                "message": "Lonely",
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["count"], 0)
+        self.assertEqual(r.data["notifications"], [])
+
+    def test_send_by_non_member_returns_403(self):
+        r = self.client_c.post(
+            "/api/rooms/general/send/",
+            {
+                "notification_type_key": self.ntype.key,
+                "message": "Not a member",
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(
+            Notification.objects.filter(message="Not a member").exists()
+        )
+
+    def test_send_requires_auth(self):
+        r = self.anon_client.post(
+            "/api/rooms/general/send/",
+            {
+                "notification_type_key": self.ntype.key,
+                "message": "Anon",
+            },
+            format="json",
+        )
+        assert_unauthorized(r)
+
+    def test_send_invalid_type_returns_400(self):
+        r = self.client_a.post(
+            "/api/rooms/general/send/",
+            {"notification_type_key": "nope", "message": "Bad"},
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_send_is_idempotent_per_recipient(self):
+        key = "room-dup"
+        with self.captureOnCommitCallbacks(execute=True):
+            r1 = self.client_a.post(
+                "/api/rooms/general/send/",
+                {
+                    "notification_type_key": self.ntype.key,
+                    "message": "First",
+                    "idempotency_key": key,
+                },
+                format="json",
+            )
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            r2 = self.client_a.post(
+                "/api/rooms/general/send/",
+                {
+                    "notification_type_key": self.ntype.key,
+                    "message": "Duplicate",
+                    "idempotency_key": key,
+                },
+                format="json",
+            )
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+        self.assertEqual(r2.data["count"], 0)
+        self.assertEqual(
+            Notification.objects.filter(recipient=self.user_b).count(), 1
+        )
+        self.assertEqual(
+            Notification.objects.get(recipient=self.user_b).message, "First"
+        )
+
+    # --- Room filter on notifications list ---
+
+    def test_list_filters_by_room(self):
+        Notification.objects.create(
+            recipient=self.user_b,
+            notification_type=self.ntype,
+            room=self.room,
+            message="In room",
+        )
+        Notification.objects.create(
+            recipient=self.user_b,
+            notification_type=self.ntype,
+            message="Not in room",
+        )
+        r = self.client_b.get("/api/notifications/?room=general")
+        results = r.data.get("results", r.data)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["message"], "In room")
+        self.assertEqual(results[0]["room"], "general")

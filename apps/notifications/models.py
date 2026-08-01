@@ -47,6 +47,13 @@ class Notification(models.Model):
     message = models.TextField()
     verb = models.CharField(max_length=255, blank=True, default="")
     data = models.JSONField(default=dict)
+    room = models.ForeignKey(
+        "Room",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="notifications",
+    )
     priority = models.CharField(
         max_length=10,
         choices=Priority.choices,
@@ -72,6 +79,10 @@ class Notification(models.Model):
             models.Index(
                 fields=["recipient", "is_read"],
                 name="idx_notif_recipient_read",
+            ),
+            models.Index(
+                fields=["recipient", "room", "-created_at"],
+                name="idx_notif_recipient_room",
             ),
         ]
 
@@ -158,3 +169,44 @@ class DeliveryLog(models.Model):
 
     def __str__(self):
         return f"{self.notification} / {self.channel} / {self.status}"
+
+
+class Room(models.Model):
+    slug = models.SlugField(max_length=100, unique=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_rooms",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class RoomMember(models.Model):
+    room = models.ForeignKey(
+        Room,
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="room_memberships",
+    )
+    joined_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["joined_at"]
+        unique_together = [("room", "user")]
+
+    def __str__(self):
+        return f"{self.user} / {self.room}"

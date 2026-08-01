@@ -1,13 +1,21 @@
 from django.contrib.auth import get_user_model
+from django.utils.text import slugify
 from rest_framework import serializers
 
-from .models import Notification, NotificationPreference, NotificationType
+from .models import (
+    Notification,
+    NotificationPreference,
+    NotificationType,
+    Room,
+    RoomMember,
+)
 
 
 class NotificationSerializer(serializers.ModelSerializer):
     notification_type = serializers.SlugField(
         source="notification_type.key", read_only=True
     )
+    room = serializers.SlugField(source="room.slug", read_only=True)
 
     class Meta:
         model = Notification
@@ -16,6 +24,7 @@ class NotificationSerializer(serializers.ModelSerializer):
             "recipient",
             "notification_type",
             "actor",
+            "room",
             "message",
             "verb",
             "data",
@@ -29,6 +38,7 @@ class NotificationSerializer(serializers.ModelSerializer):
             "id",
             "recipient",
             "actor",
+            "room",
             "is_read",
             "read_at",
             "created_at",
@@ -96,3 +106,52 @@ class NotificationPreferenceWriteItemSerializer(serializers.Serializer):
                 f"NotificationType '{value}' does not exist."
             )
         return value
+
+
+class RoomSerializer(serializers.ModelSerializer):
+    created_by = serializers.IntegerField(source="created_by_id", read_only=True)
+    member_count = serializers.IntegerField(read_only=True, default=0)
+    is_member = serializers.BooleanField(read_only=True, default=False)
+
+    class Meta:
+        model = Room
+        fields = [
+            "slug",
+            "name",
+            "description",
+            "created_by",
+            "member_count",
+            "is_member",
+            "created_at",
+        ]
+
+
+class RoomCreateSerializer(serializers.ModelSerializer):
+    slug = serializers.SlugField(required=False, allow_blank=True)
+
+    class Meta:
+        model = Room
+        fields = ["slug", "name", "description"]
+
+    def create(self, validated_data):
+        base_slug = validated_data.get("slug") or slugify(
+            validated_data["name"]
+        ) or "room"
+        slug = base_slug
+        counter = 2
+        while Room.objects.filter(slug=slug).exists():
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        return Room.objects.create(
+            slug=slug,
+            name=validated_data["name"],
+            description=validated_data.get("description", ""),
+        )
+
+
+class RoomMemberSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(source="user.email", read_only=True)
+
+    class Meta:
+        model = RoomMember
+        fields = ["user_id", "email", "joined_at"]
